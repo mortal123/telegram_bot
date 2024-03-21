@@ -2,7 +2,11 @@ mod data_api;
 mod tokens;
 mod types;
 
-use std::collections::{HashMap, HashSet};
+use chrono::{DateTime, Utc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+};
 use teloxide::{
     prelude::*,
     utils::{command::BotCommands, markdown::escape},
@@ -110,8 +114,8 @@ fn parse_transaction_summary(summary: &TransactionSummary) -> UserAction {
     }
 }
 
-async fn account_actions(user: String, from: i64, to: i64) -> Vec<UserAction> {
-    let transactions = account_transfers(user.clone(), from, to).await;
+async fn account_actions(user: String, from: i64, to: i64, limit: usize) -> Vec<UserAction> {
+    let transactions = account_transfers(user.clone(), from, to, limit).await;
 
     let mut user_actions = Vec::new();
     for transaction in transactions {
@@ -151,54 +155,49 @@ async fn account_actions(user: String, from: i64, to: i64) -> Vec<UserAction> {
 }
 
 async fn quiz(user: String, days: usize) -> String {
-    // AMM
-    // let amms = HashMap::from([
-    //     (
-    //         "5Q544fKrFoe6tsEbD7S8EmxGTJYAKtTVhAW5Q5pge4j1".to_string(),
-    //         "RAYDIUM_V4".to_string(),
-    //     ),
-    //     (
-    //         "BQ72nSv9f3PRyRKCBnHLVrerrv37CYTHm5h3s9VSGQDV".to_string(),
-    //         "JUPITER_V6".to_string(),
-    //     ),
-    // ]);
-
-    // 山哥notion上的 copy trader
-    // let user = "HfcB5GVWnUvLsNGeGo9CZEYqVmy8QViZBRtRo4mjJeBe".to_string();
-    // let user = "Cu5VRDQDnxSmSLUuRc2znNnxoCKJM9VEbXUTUKwUcHk9".to_string();
     let now = chrono::Utc::now();
     let from = now - chrono::Duration::try_days(days as i64).unwrap();
 
-    let user_actions = account_actions(user, from.timestamp(), now.timestamp()).await;
+    log::debug!("from={}, to={}", from.timestamp(), now.timestamp());
+    let user_actions = account_actions(user, from.timestamp(), now.timestamp(), 2000).await;
 
-    let mut map: HashMap<String, (i64, i64)> = HashMap::new();
-    for user_action in user_actions {
+    let mut map: HashMap<String, (i64, i64, i64)> = HashMap::new();
+    for user_action in user_actions.into_iter().rev() {
         if let UserActionContent::Exchange(ex) = user_action.content {
             if ex.spend.is_sol() && !ex.receive.is_sol() {
                 // buy
-                let (sol, other) = map.get(&ex.receive.address).unwrap_or(&(0i64, 0i64));
+                let (sol, other, _) = map.get(&ex.receive.address).unwrap_or(&(0i64, 0i64, 0));
                 map.insert(
                     ex.receive.address,
                     (
                         *sol - ex.spend.amount as i64,
                         *other + ex.receive.amount as i64,
+                        user_action.metadata.timestamp,
                     ),
                 );
             } else if !ex.spend.is_sol() && ex.receive.is_sol() {
                 // sell
-                let (sol, other) = map.get(&ex.spend.address).unwrap_or(&(0i64, 0i64));
+                let (sol, other, _) = map.get(&ex.spend.address).unwrap_or(&(0i64, 0i64, 0));
                 map.insert(
                     ex.spend.address,
                     (
                         *sol + ex.receive.amount as i64,
                         *other - ex.spend.amount as i64,
+                        user_action.metadata.timestamp,
                     ),
                 );
             }
         } else if let UserActionContent::Receive(tm) = user_action.content {
             if !tm.is_sol() {
-                let (sol, other) = map.get(&tm.address).unwrap_or(&(0i64, 0i64));
-                map.insert(tm.address, (*sol, *other + tm.amount as i64));
+                let (sol, other, _) = map.get(&tm.address).unwrap_or(&(0i64, 0i64, 0));
+                map.insert(
+                    tm.address,
+                    (
+                        *sol,
+                        *other + tm.amount as i64,
+                        user_action.metadata.timestamp,
+                    ),
+                );
             }
         }
     }
@@ -218,12 +217,15 @@ async fn quiz(user: String, days: usize) -> String {
                 }
                 .to_string(),
             );
+            let datetime = escape(&DateTime::from_timestamp(v.2, 0).unwrap().to_string());
+
             format!(
-                "[{}](https://solana.fm/address/{}): {} vs {}",
+                "[{}](https://solana.fm/address/{}): {} vs {} @ {}",
                 &k[..6],
                 k,
                 escaped_sol,
-                escaped_other
+                escaped_other,
+                datetime,
             )
         })
         .collect::<Vec<_>>()
@@ -234,9 +236,14 @@ async fn actions(user: String, num: usize) -> String {
     let now = chrono::Utc::now();
     let from = now - chrono::Duration::try_days(7).unwrap();
 
-    let user_actions = account_actions(user, from.timestamp(), now.timestamp()).await;
+    log::debug!("from={}, to={}", from.timestamp(), now.timestamp());
+    let user_actions = account_actions(user, from.timestamp(), now.timestamp(), num).await;
     user_actions
         .iter()
+        // .filter(|a| match a.content {
+        //     UserActionContent::None => false,
+        //     _ => true,
+        // })
         .take(num)
         .map(|a| a.to_string())
         .collect::<Vec<_>>()

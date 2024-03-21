@@ -1,5 +1,3 @@
-use std::fs;
-
 use reqwest;
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +17,8 @@ pub struct Transaction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Instruction {
     pub action: Action,
+
+    pub status: String,
 
     pub source: String,
     #[serde(rename = "sourceAssociation")]
@@ -44,14 +44,38 @@ pub enum Action {
     Unknown,
 }
 
-pub async fn account_transfers(user: String, from: i64, to: i64) -> Vec<Transaction> {
-    let url = format!(
-        "https://api.solana.fm/v0/accounts/{}/transfers?utcFrom={}&utcTo={}&page=1",
-        user, from, to
-    );
-    let response_text = reqwest::get(url).await.unwrap().text().await.unwrap();
-    fs::write("response.cache", &response_text).unwrap();
-    let response: Response = serde_json::from_str(&response_text).unwrap();
+const MAX_PAGE_NUMBER: usize = 100;
 
-    response.results
+pub async fn account_transfers(user: String, from: i64, to: i64, limit: usize) -> Vec<Transaction> {
+    let mut transactions = Vec::new();
+    let mut page = 1;
+    while transactions.len() < limit {
+        let url = format!(
+            "https://api.solana.fm/v0/accounts/{}/transfers?utcFrom={}&utcTo={}&page={}&limit={}",
+            user, from, to, page, MAX_PAGE_NUMBER,
+        );
+        let response_text = reqwest::get(url).await.unwrap().text().await.unwrap();
+        // fs::write("response.json", &response_text).unwrap();
+        let response: Response = serde_json::from_str(&response_text).unwrap();
+        let tx_num = response.results.len();
+
+        transactions.extend(response.results);
+
+        if tx_num < MAX_PAGE_NUMBER {
+            break;
+        }
+        page += 1;
+    }
+
+    transactions
+        .into_iter()
+        .filter(|tx| {
+            if tx.data.iter().any(|ins| ins.status != "Successful") {
+                false
+            } else {
+                true
+            }
+        })
+        .take(limit)
+        .collect()
 }
