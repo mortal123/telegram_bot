@@ -46,7 +46,16 @@ pub enum Action {
 
 const MAX_PAGE_NUMBER: usize = 100;
 
-pub async fn account_transfers(user: String, from: i64, to: i64, limit: usize) -> Vec<Transaction> {
+pub async fn account_transfers(
+    user: String,
+    from: i64,
+    to: i64,
+    mut limit: usize,
+) -> Vec<Transaction> {
+    if limit == 0 {
+        limit = 2000;
+    }
+
     let mut transactions = Vec::new();
     let mut page = 1;
     while transactions.len() < limit {
@@ -65,6 +74,10 @@ pub async fn account_transfers(user: String, from: i64, to: i64, limit: usize) -
             break;
         }
         page += 1;
+    }
+
+    if transactions.len() >= limit {
+        log::debug!("Account transfer reach limit: {}", limit);
     }
 
     transactions

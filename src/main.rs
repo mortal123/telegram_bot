@@ -1,16 +1,15 @@
 mod data_api;
 mod tokens;
 mod types;
+mod utils;
 
-use chrono::{DateTime, Utc};
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Debug,
-};
+use chrono::DateTime;
+use std::collections::{HashMap, HashSet};
 use teloxide::{
     prelude::*,
     utils::{command::BotCommands, markdown::escape},
 };
+use tokens::save_tokens;
 use types::{Metadata, TokenAmount, UserAction, UserActionContent};
 
 use crate::{
@@ -56,26 +55,17 @@ impl TransactionSummary {
     }
 }
 
-fn parse_transaction_summary(summary: &TransactionSummary) -> UserAction {
-    let spends: Vec<_> = summary
-        .balances
-        .iter()
-        .filter(|(_, &v)| v > 0)
-        .map(|(k, v)| TokenAmount {
-            address: k.clone(),
-            amount: *v,
-        })
-        .collect();
+async fn parse_transaction_summary(summary: &TransactionSummary) -> UserAction {
+    let mut spends = Vec::new();
+    let mut receives = Vec::new();
 
-    let receives: Vec<_> = summary
-        .balances
-        .iter()
-        .filter(|(_, &v)| v < 0)
-        .map(|(k, v)| TokenAmount {
-            address: k.clone(),
-            amount: -*v,
-        })
-        .collect();
+    for (k, &v) in summary.balances.iter() {
+        if v > 0 {
+            spends.push(TokenAmount::new_with_amount(k, v).await);
+        } else {
+            receives.push(TokenAmount::new_with_amount(k, -v).await);
+        }
+    }
 
     let metadata = Metadata {
         timestamp: summary.timestamp,
@@ -114,7 +104,9 @@ fn parse_transaction_summary(summary: &TransactionSummary) -> UserAction {
     }
 }
 
+// newest to oldest
 async fn account_actions(user: String, from: i64, to: i64, limit: usize) -> Vec<UserAction> {
+    log::debug!("account actions: from={}, to={}, limit={}", from, to, limit);
     let transactions = account_transfers(user.clone(), from, to, limit).await;
 
     let mut user_actions = Vec::new();
@@ -123,11 +115,11 @@ async fn account_actions(user: String, from: i64, to: i64, limit: usize) -> Vec<
         summary.hash = transaction.transaction_hash;
 
         for instruction in transaction.data {
+            summary.set_timestamp(instruction.timestamp);
+
             if instruction.token == "" {
                 continue;
             }
-
-            summary.set_timestamp(instruction.timestamp);
 
             if instruction.action == Action::Transfer
                 || instruction.action == Action::TransferChecked
@@ -149,7 +141,7 @@ async fn account_actions(user: String, from: i64, to: i64, limit: usize) -> Vec<
             }
         }
 
-        user_actions.push(parse_transaction_summary(&summary));
+        user_actions.push(parse_transaction_summary(&summary).await);
     }
     user_actions
 }
@@ -158,8 +150,7 @@ async fn quiz(user: String, days: usize) -> String {
     let now = chrono::Utc::now();
     let from = now - chrono::Duration::try_days(days as i64).unwrap();
 
-    log::debug!("from={}, to={}", from.timestamp(), now.timestamp());
-    let user_actions = account_actions(user, from.timestamp(), now.timestamp(), 2000).await;
+    let user_actions = account_actions(user, from.timestamp(), now.timestamp(), 0).await;
 
     let mut map: HashMap<String, (i64, i64, i64)> = HashMap::new();
     for user_action in user_actions.into_iter().rev() {
@@ -201,50 +192,42 @@ async fn quiz(user: String, days: usize) -> String {
             }
         }
     }
-    map.iter()
-        .map(|(k, v)| {
-            let escaped_sol = escape(
-                &TokenAmount {
-                    address: SOL_TOKEN.to_string(),
-                    amount: v.0,
-                }
-                .to_string(),
-            );
-            let escaped_other = escape(
-                &TokenAmount {
-                    address: k.clone(),
-                    amount: v.1,
-                }
-                .to_string(),
-            );
-            let datetime = escape(&DateTime::from_timestamp(v.2, 0).unwrap().to_string());
 
-            format!(
-                "[{}](https://solana.fm/address/{}): {} vs {} @ {}",
-                &k[..6],
-                k,
-                escaped_sol,
-                escaped_other,
-                datetime,
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut pairs: Vec<_> = map.into_iter().collect();
+    pairs.sort_by_key(|(_, v)| v.2);
+
+    let mut lines = Vec::new();
+    for (k, v) in pairs.iter().rev() {
+        let escaped_sol = escape(
+            &TokenAmount::new_with_amount(&SOL_TOKEN.to_string(), v.0)
+                .await
+                .to_string(),
+        );
+        let escaped_other = escape(&TokenAmount::new_with_amount(k, v.1).await.to_string());
+        let datetime = escape(&utils::datetime_to_string(
+            DateTime::from_timestamp(v.2, 0).unwrap(),
+        ));
+
+        lines.push(format!(
+            "[{}](https://solana.fm/address/{}): {} vs {}",
+            datetime, k, escaped_sol, escaped_other,
+        ));
+    }
+    lines.join("\n")
 }
 
-async fn actions(user: String, num: usize) -> String {
+async fn actions(user: String, days: usize) -> String {
     let now = chrono::Utc::now();
-    let from = now - chrono::Duration::try_days(7).unwrap();
+    let from = now - chrono::Duration::try_days(days as i64).unwrap();
 
-    log::debug!("from={}, to={}", from.timestamp(), now.timestamp());
-    let user_actions = account_actions(user, from.timestamp(), now.timestamp(), num).await;
+    let user_actions = account_actions(user, from.timestamp(), now.timestamp(), 0).await;
     user_actions
         .iter()
         // .filter(|a| match a.content {
         //     UserActionContent::None => false,
         //     _ => true,
         // })
-        .take(num)
+        .take(50)
         .map(|a| a.to_string())
         .collect::<Vec<_>>()
         .join("\n")
@@ -264,10 +247,12 @@ enum Command {
     )]
     Quiz { user: String, days: usize },
     #[command(
-        description = "Show someone last 'number' of actions in the last few days.",
+        description = "Show someone actions in the last few days. If more than 50 transaction in these days, at most 50 will be displayed",
         parse_with = "split"
     )]
-    Actions { user: String, num: usize },
+    Actions { user: String, days: usize },
+    #[command(description = "Save the tokens metadata into cache")]
+    SaveTokens,
 }
 
 async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
@@ -283,11 +268,16 @@ async fn answer(bot: Bot, msg: Message, cmd: Command) -> ResponseResult<()> {
                 .parse_mode(teloxide::types::ParseMode::MarkdownV2)
                 .await?
         }
-        Command::Actions { user, num } => {
-            let message = actions(user, num).await;
+        Command::Actions { user, days } => {
+            let message = actions(user, days).await;
             log::debug!("{}", message);
             bot.send_message(msg.chat.id, message)
                 .parse_mode(teloxide::types::ParseMode::MarkdownV2)
+                .await?
+        }
+        Command::SaveTokens => {
+            let size = save_tokens().await;
+            bot.send_message(msg.chat.id, format!("Total {size} tokens are saved"))
                 .await?
         }
     };

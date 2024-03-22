@@ -6,11 +6,16 @@ use std::{
 use chrono::DateTime;
 use teloxide::utils::markdown::escape;
 
-use crate::tokens::{SOL_TOKEN, TOKENS};
+use crate::{
+    tokens::{lookup_token, SOL_TOKEN},
+    utils::datetime_to_string,
+};
 
 #[derive(Clone, Debug)]
 pub struct TokenAmount {
     pub address: String,
+    pub decimals: usize,
+    pub symbol: String,
     pub amount: i64,
 }
 
@@ -19,24 +24,35 @@ impl TokenAmount {
         self.address == SOL_TOKEN
     }
 
-    pub fn short_address(&self) -> &str {
-        &self.address[..6]
+    pub async fn new(address: &String) -> Self {
+        let token = lookup_token(address).await;
+        Self {
+            address: address.clone(),
+            decimals: token.decimals,
+            symbol: token.symbol,
+            amount: 0,
+        }
+    }
+
+    pub async fn new_with_amount(address: &String, amount: i64) -> Self {
+        let mut s = Self::new(address).await;
+        s.amount = amount;
+        s
+    }
+
+    pub fn _amount_change(&mut self, change: i64) {
+        self.amount += change;
     }
 }
 
 impl Display for TokenAmount {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match TOKENS.get(&self.address) {
-            None => write!(f, "{} {}", self.amount, self.short_address()),
-            Some(token) => {
-                write!(
-                    f,
-                    "{} {}",
-                    self.amount as f64 / 10f64.powf(token.decimals as f64),
-                    token.symbol
-                )
-            }
-        }
+        write!(
+            f,
+            "{} {}",
+            self.amount as f64 / 10f64.powf(self.decimals as f64),
+            self.symbol
+        )
     }
 }
 
@@ -60,7 +76,7 @@ impl Display for UserAction {
         write!(
             f,
             "[{}](https://solana.fm/tx/{}): {}",
-            datetime.format("%m/%d %H:%M:%S").to_string(),
+            datetime_to_string(datetime),
             self.metadata.transaction_hash,
             escaped_content,
         )
